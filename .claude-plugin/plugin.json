@@ -1,0 +1,7 @@
+{
+  "name": "claude-token-tracker",
+  "description": "Per-turn token and cost tracking for Claude Code. Reads directly from the session transcript — no statusline dependency. Records input, output, cache read/write tokens and calculates cost per turn to ~/.claude/token-usage.json.",
+  "version": "1.0.0",
+  "author": "Felipe P.",
+  "keywords": ["tokens", "cost", "monitoring", "usage", "tracking"]
+}

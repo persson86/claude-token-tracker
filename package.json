@@ -1,0 +1,12 @@
+{
+  "name": "claude-token-tracker",
+  "version": "1.0.0",
+  "description": "Per-turn token and cost tracking for Claude Code",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test token-tracker.test.cjs"
+  }
+}
