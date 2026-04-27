@@ -6,6 +6,8 @@ const fs        = require('fs');
 const os        = require('os');
 const path      = require('path');
 
+const { spawn }  = require('node:child_process');
+
 const { getCurrentTurn, calculateCost, processEvent } = require('./token-tracker.cjs');
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -382,5 +384,44 @@ test('edge: transcript_path inexistente — sai sem crash', async () => {
       { usagePath }
     );
     assert.throws(() => fs.readFileSync(usagePath));
+  } finally { fs.rmSync(dir, { recursive: true }); }
+});
+
+// ── e2e (spawn real do binário com stdin) ────────────────────────────────────
+
+test('e2e: spawn real do hook lê stdin e grava ~/.claude/token-usage.json', async () => {
+  const dir = makeTempDir();
+  try {
+    const tp = writeTranscript(dir, [userPrompt(), assistantEntry(SONNET, sampleUsage)]);
+    const event = {
+      hook_event_name: 'Stop',
+      transcript_path: tp,
+      session_id:      'sess-e2e',
+      cwd:             '/proj',
+    };
+
+    const exitCode = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [path.join(__dirname, 'token-tracker.cjs')], {
+        env: { ...process.env, HOME: dir }, // redireciona ~/.claude para o tmpdir
+      });
+      child.on('error', reject);
+      child.on('exit', resolve);
+      child.stdin.end(JSON.stringify(event));
+    });
+
+    assert.equal(exitCode, 0);
+
+    const usagePath = path.join(dir, '.claude', 'token-usage.json');
+    const entries   = JSON.parse(fs.readFileSync(usagePath, 'utf8'));
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].session_id, 'sess-e2e');
+    assert.equal(entries[0].project,    '/proj');
+    assert.equal(entries[0].model,      SONNET);
+    assert.equal(entries[0].api_calls,  1);
+    assert.equal(entries[0].in,         10);
+    assert.equal(entries[0].out,        200);
+    assert.equal(entries[0].cache_r,    5000);
+    assert.equal(entries[0].cache_write, 1000);
+    assert.ok(entries[0].cost_usd > 0);
   } finally { fs.rmSync(dir, { recursive: true }); }
 });
