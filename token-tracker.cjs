@@ -107,7 +107,13 @@ async function processEvent(input, config = {}) {
   const { transcript_path, session_id, cwd } = input;
   if (!transcript_path) return;
 
-  const turn = getCurrentTurn(transcript_path);
+  // For very short turns, the assistant entry may not be flushed to the
+  // transcript yet when the Stop hook fires. Retry once after a short delay.
+  let turn = getCurrentTurn(transcript_path);
+  if (!turn) {
+    await new Promise(r => setTimeout(r, 250));
+    turn = getCurrentTurn(transcript_path);
+  }
   if (!turn) return;
 
   const cost    = calculateCost(turn.model, turn.usage);
