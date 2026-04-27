@@ -31,8 +31,8 @@ function assistantEntry(model, usage, extra = {}) {
   };
 }
 
-function userEntry() {
-  return { type: 'user', message: { role: 'user', content: 'hello' } };
+function userEntry(extra = {}) {
+  return { type: 'user', message: { role: 'user', content: 'hello' }, ...extra };
 }
 
 const SONNET = 'claude-sonnet-4-6';
@@ -202,6 +202,47 @@ test('integração: acumula múltiplas entradas', async () => {
     assert.equal(entries.length, 2);
     assert.equal(entries[0].out, 100);
     assert.equal(entries[1].out, 200);
+  } finally { fs.rmSync(dir, { recursive: true }); }
+});
+
+test('parsing: extrai gitBranch do transcript (ignora HEAD)', () => {
+  const dir = makeTempDir();
+  try {
+    const entries = [
+      userEntry({ gitBranch: 'HEAD' }),
+      assistantEntry(SONNET, sampleUsage),
+      userEntry({ gitBranch: 'feat/AIOX-123-token-tracking', slug: 'minha-sessao-gifted-turing' }),
+    ];
+    const tp = writeTranscript(dir, entries);
+    const turn = getLastAssistantTurn(tp);
+    assert.equal(turn.gitBranch, 'feat/AIOX-123-token-tracking');
+    assert.equal(turn.sessionSlug, 'minha-sessao-gifted-turing');
+  } finally { fs.rmSync(dir, { recursive: true }); }
+});
+
+test('parsing: gitBranch e sessionSlug null quando ausentes', () => {
+  const dir = makeTempDir();
+  try {
+    const tp = writeTranscript(dir, [assistantEntry(SONNET, sampleUsage)]);
+    const turn = getLastAssistantTurn(tp);
+    assert.equal(turn.gitBranch, null);
+    assert.equal(turn.sessionSlug, null);
+  } finally { fs.rmSync(dir, { recursive: true }); }
+});
+
+test('integração: grava git_branch e session_name no entry', async () => {
+  const dir = makeTempDir();
+  try {
+    const entries = [
+      userEntry({ gitBranch: 'feat/AIOX-42-my-story', slug: 'sessao-de-teste-jolly-fox' }),
+      assistantEntry(SONNET, sampleUsage),
+    ];
+    const tp = writeTranscript(dir, entries);
+    const usagePath = path.join(dir, 'usage.json');
+    await processEvent({ transcript_path: tp, session_id: 's', cwd: '/p' }, { usagePath });
+    const [entry] = JSON.parse(fs.readFileSync(usagePath, 'utf8'));
+    assert.equal(entry.git_branch, 'feat/AIOX-42-my-story');
+    assert.equal(entry.session_name, 'sessao-de-teste-jolly-fox');
   } finally { fs.rmSync(dir, { recursive: true }); }
 });
 

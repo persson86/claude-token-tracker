@@ -30,15 +30,28 @@ function getLastAssistantTurn(transcriptPath) {
   try { content = fs.readFileSync(transcriptPath, 'utf8'); } catch { return null; }
 
   const lines = content.trim().split('\n');
+  let assistantTurn = null;
+  let gitBranch = null;
+  let sessionSlug = null;
+
   for (let i = lines.length - 1; i >= 0; i--) {
     try {
       const entry = JSON.parse(lines[i]);
-      if (entry.type === 'assistant' && entry.message?.usage) {
-        return { model: entry.message.model, usage: entry.message.usage };
+      if (!assistantTurn && entry.type === 'assistant' && entry.message?.usage) {
+        assistantTurn = { model: entry.message.model, usage: entry.message.usage };
       }
+      if (!gitBranch && entry.gitBranch && entry.gitBranch !== 'HEAD') {
+        gitBranch = entry.gitBranch;
+      }
+      if (!sessionSlug && entry.slug) {
+        sessionSlug = entry.slug;
+      }
+      if (assistantTurn && gitBranch && sessionSlug) break;
     } catch { /* skip malformed lines */ }
   }
-  return null;
+
+  if (!assistantTurn) return null;
+  return { model: assistantTurn.model, usage: assistantTurn.usage, gitBranch, sessionSlug };
 }
 
 function calculateCost(model, usage = {}) {
@@ -76,16 +89,18 @@ async function processEvent(input, config = {}) {
   try { entries = JSON.parse(fs.readFileSync(usagePath, 'utf8')); } catch { /* new file */ }
 
   entries.push({
-    date:        now.toISOString().split('T')[0],
-    timestamp:   now.toISOString(),
-    session_id:  session_id || null,
-    project:     cwd || null,
-    model:       turn.model,
-    in:          usage.input_tokens               || 0,
-    out:         usage.output_tokens              || 0,
-    cache_r:     usage.cache_read_input_tokens    || 0,
-    cache_write: usage.cache_creation_input_tokens || 0,
-    cost_usd:    Math.round(cost * 1e8) / 1e8,
+    date:          now.toISOString().split('T')[0],
+    timestamp:     now.toISOString(),
+    session_id:    session_id || null,
+    session_name:  turn.sessionSlug || null,
+    project:       cwd || null,
+    git_branch:    turn.gitBranch || null,
+    model:         turn.model,
+    in:            usage.input_tokens               || 0,
+    out:           usage.output_tokens              || 0,
+    cache_r:       usage.cache_read_input_tokens    || 0,
+    cache_write:   usage.cache_creation_input_tokens || 0,
+    cost_usd:      Math.round(cost * 1e8) / 1e8,
   });
 
   fs.writeFileSync(usagePath, JSON.stringify(entries, null, 2));
