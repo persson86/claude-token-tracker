@@ -12,11 +12,6 @@ if ! command -v node &>/dev/null; then
   exit 1
 fi
 
-if ! command -v python3 &>/dev/null; then
-  echo "Error: python3 not found. Required for the statusline display." >&2
-  exit 1
-fi
-
 # Ensure settings.json exists
 if [[ ! -f "$SETTINGS" ]]; then
   mkdir -p "$(dirname "$SETTINGS")"
@@ -27,7 +22,7 @@ fi
 cp "$SETTINGS" "$SETTINGS.bak"
 
 HOOK_CMD="node $PLUGIN_DIR/token-tracker.cjs"
-STATUSLINE_CMD="bash $PLUGIN_DIR/statusline.sh"
+STATUSLINE_CMD="node $PLUGIN_DIR/statusline.cjs"
 
 PATCHED=$(node -e "
 const fs = require('fs');
@@ -44,8 +39,10 @@ if (!hookExists) {
   settings.hooks.Stop.push({ hooks: [{ type: 'command', command: hookCmd, timeout: 10 }] });
 }
 
-// Statusline (only set if not already configured)
-if (!settings.statusLine) {
+// Statusline: set if absent, or refresh if it points to this plugin's directory
+const pluginDir = '$PLUGIN_DIR';
+const currentCmd = settings.statusLine?.command;
+if (!settings.statusLine || (typeof currentCmd === 'string' && currentCmd.includes(pluginDir))) {
   settings.statusLine = { type: 'command', command: '$STATUSLINE_CMD' };
 }
 

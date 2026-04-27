@@ -12,7 +12,7 @@ fi
 cp "$SETTINGS" "$SETTINGS.bak"
 
 HOOK_CMD="node $PLUGIN_DIR/token-tracker.cjs"
-STATUSLINE_CMD="bash $PLUGIN_DIR/statusline.sh"
+STATUSLINE_CMD="node $PLUGIN_DIR/statusline.cjs"
 
 node -e "
 const fs = require('fs');

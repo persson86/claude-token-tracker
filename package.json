@@ -1,8 +1,10 @@
 {
   "name": "claude-token-tracker",
   "version": "1.0.0",
-  "description": "Per-turn token and cost tracking for Claude Code",
+  "description": "Per-turn token and cost tracking for Claude Code. Reads directly from the session transcript and records input, output, cache read/write tokens plus USD cost per turn to ~/.claude/token-usage.json.",
+  "author": "Felipe P.",
   "license": "MIT",
+  "keywords": ["tokens", "cost", "monitoring", "usage", "tracking"],
   "engines": {
     "node": ">=18"
   },

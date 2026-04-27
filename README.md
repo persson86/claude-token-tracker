@@ -15,7 +15,6 @@ Fields: model · working directory · cumulative session cost · context window 
 ## Requirements
 
 - Node.js ≥ 18
-- Python 3
 - Claude Code CLI
 
 ## Install
