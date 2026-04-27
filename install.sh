@@ -28,23 +28,31 @@ PATCHED=$(node -e "
 const fs = require('fs');
 const settings = JSON.parse(fs.readFileSync('$SETTINGS', 'utf8'));
 
-// Stop hook
-if (!settings.hooks) settings.hooks = {};
-if (!settings.hooks.Stop) settings.hooks.Stop = [];
-const hookCmd = '$HOOK_CMD';
-const hookExists = settings.hooks.Stop.some(g =>
-  Array.isArray(g.hooks) && g.hooks.some(h => h.command === hookCmd)
-);
-if (!hookExists) {
-  settings.hooks.Stop.push({ hooks: [{ type: 'command', command: hookCmd, timeout: 10 }] });
-}
+const hookCmd   = '$HOOK_CMD';
+const statusCmd = '$STATUSLINE_CMD';
 
-// Statusline: set if absent, or refresh if it points to this plugin's directory
-const pluginDir = '$PLUGIN_DIR';
-const currentCmd = settings.statusLine?.command;
-if (!settings.statusLine || (typeof currentCmd === 'string' && currentCmd.includes(pluginDir))) {
-  settings.statusLine = { type: 'command', command: '$STATUSLINE_CMD' };
+// Match any token-tracker invocation regardless of path — handles reinstalls
+// from different folders and clears stale entries from previous installs.
+const isTrackerHook   = (c) => typeof c === 'string' && /\/token-tracker\.cjs(\s|\$)/.test(c);
+const isTrackerStatus = (c) => typeof c === 'string' && /\/statusline\.cjs(\s|\$)/.test(c);
+
+// Stop hook: drop any existing token-tracker hook (any path), then add this one.
+if (!settings.hooks) settings.hooks = {};
+if (Array.isArray(settings.hooks.Stop)) {
+  settings.hooks.Stop = settings.hooks.Stop
+    .map(g => ({ ...g, hooks: (g.hooks || []).filter(h => !isTrackerHook(h.command)) }))
+    .filter(g => g.hooks.length > 0);
+} else {
+  settings.hooks.Stop = [];
 }
+settings.hooks.Stop.push({ hooks: [{ type: 'command', command: hookCmd, timeout: 10 }] });
+
+// Statusline: always point to this install. Warn when replacing something unrelated.
+const currentStatus = settings.statusLine?.command;
+if (currentStatus && !isTrackerStatus(currentStatus)) {
+  console.error('⚠  Replacing existing statusLine: ' + currentStatus);
+}
+settings.statusLine = { type: 'command', command: statusCmd };
 
 console.log(JSON.stringify(settings, null, 2));
 ")

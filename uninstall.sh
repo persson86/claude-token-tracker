@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PLUGIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 SETTINGS="$HOME/.claude/settings.json"
 
 if [[ ! -f "$SETTINGS" ]]; then
@@ -11,25 +10,24 @@ fi
 
 cp "$SETTINGS" "$SETTINGS.bak"
 
-HOOK_CMD="node $PLUGIN_DIR/token-tracker.cjs"
-STATUSLINE_CMD="node $PLUGIN_DIR/statusline.cjs"
-
 node -e "
 const fs = require('fs');
 const settings = JSON.parse(fs.readFileSync('$SETTINGS', 'utf8'));
 
-// Remove Stop hook
-const hookCmd = '$HOOK_CMD';
+// Path-agnostic match: removes any token-tracker install regardless of where
+// uninstall is run from.
+const isTrackerHook   = (c) => typeof c === 'string' && /\/token-tracker\.cjs(\s|\$)/.test(c);
+const isTrackerStatus = (c) => typeof c === 'string' && /\/statusline\.cjs(\s|\$)/.test(c);
+
 if (settings.hooks?.Stop) {
-  settings.hooks.Stop = settings.hooks.Stop.filter(g =>
-    !(Array.isArray(g.hooks) && g.hooks.some(h => h.command === hookCmd))
-  );
+  settings.hooks.Stop = settings.hooks.Stop
+    .map(g => ({ ...g, hooks: (g.hooks || []).filter(h => !isTrackerHook(h.command)) }))
+    .filter(g => g.hooks.length > 0);
   if (settings.hooks.Stop.length === 0) delete settings.hooks.Stop;
   if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
 }
 
-// Remove statusline only if it points to this plugin
-if (settings.statusLine?.command === '$STATUSLINE_CMD') {
+if (isTrackerStatus(settings.statusLine?.command)) {
   delete settings.statusLine;
 }
 
