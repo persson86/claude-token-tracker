@@ -6,7 +6,7 @@ const fs        = require('fs');
 const os        = require('os');
 const path      = require('path');
 
-const { getLastAssistantTurn, calculateCost, processEvent } = require('./token-tracker.cjs');
+const { getCurrentTurn, calculateCost, processEvent } = require('./token-tracker.cjs');
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -20,19 +20,42 @@ function writeTranscript(dir, entries) {
   return filePath;
 }
 
-function assistantEntry(model, usage, extra = {}) {
+let msgCounter = 0;
+function assistantEntry(model, usage, opts = {}) {
+  msgCounter++;
   return {
     type: 'assistant',
     uuid: Math.random().toString(36).slice(2),
     sessionId: 'sess-test',
     cwd: '/test',
-    message: { model, role: 'assistant', content: [], usage, ...extra },
-    ...extra,
+    isSidechain: opts.isSidechain || false,
+    message: {
+      id: opts.messageId || `msg-${msgCounter}`,
+      model,
+      role: 'assistant',
+      content: [],
+      usage,
+    },
+    ...(opts.gitBranch ? { gitBranch: opts.gitBranch } : {}),
+    ...(opts.slug ? { slug: opts.slug } : {}),
   };
 }
 
-function userEntry(extra = {}) {
-  return { type: 'user', message: { role: 'user', content: 'hello' }, ...extra };
+function userPrompt(text = 'hello', opts = {}) {
+  return {
+    type: 'user',
+    isSidechain: opts.isSidechain || false,
+    message: { role: 'user', content: text },
+    ...(opts.gitBranch ? { gitBranch: opts.gitBranch } : {}),
+    ...(opts.slug ? { slug: opts.slug } : {}),
+  };
+}
+
+function toolResultEntry() {
+  return {
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: 'ok' }] },
+  };
 }
 
 const SONNET = 'claude-sonnet-4-6';
@@ -45,14 +68,15 @@ const sampleUsage = {
   cache_creation_input_tokens: 1000,
 };
 
-// ── getLastAssistantTurn ─────────────────────────────────────────────────────
+// ── getCurrentTurn ───────────────────────────────────────────────────────────
 
-test('parsing: extrai tokens do último entry assistant', () => {
-  const dir  = makeTempDir();
+test('parsing: extrai tokens de um turno com 1 API call', () => {
+  const dir = makeTempDir();
   try {
-    const tp = writeTranscript(dir, [userEntry(), assistantEntry(SONNET, sampleUsage)]);
-    const turn = getLastAssistantTurn(tp);
+    const tp = writeTranscript(dir, [userPrompt(), assistantEntry(SONNET, sampleUsage)]);
+    const turn = getCurrentTurn(tp);
     assert.equal(turn.model, SONNET);
+    assert.equal(turn.apiCalls, 1);
     assert.equal(turn.usage.input_tokens, 10);
     assert.equal(turn.usage.output_tokens, 200);
     assert.equal(turn.usage.cache_read_input_tokens, 5000);
@@ -60,22 +84,108 @@ test('parsing: extrai tokens do último entry assistant', () => {
   } finally { fs.rmSync(dir, { recursive: true }); }
 });
 
-test('parsing: retorna o ÚLTIMO assistant quando há vários', () => {
+test('turn: soma usage de várias API calls (tool use)', () => {
   const dir = makeTempDir();
   try {
-    const first  = assistantEntry(SONNET, { ...sampleUsage, output_tokens: 100 });
-    const second = assistantEntry(SONNET, { ...sampleUsage, output_tokens: 999 });
-    const tp = writeTranscript(dir, [first, userEntry(), second]);
-    const turn = getLastAssistantTurn(tp);
-    assert.equal(turn.usage.output_tokens, 999);
+    const u1 = { input_tokens: 5,  output_tokens: 100, cache_read_input_tokens: 1000, cache_creation_input_tokens: 200 };
+    const u2 = { input_tokens: 3,  output_tokens: 400, cache_read_input_tokens: 2000, cache_creation_input_tokens: 50  };
+    const u3 = { input_tokens: 1,  output_tokens: 50,  cache_read_input_tokens: 3000, cache_creation_input_tokens: 0   };
+    const tp = writeTranscript(dir, [
+      userPrompt('do stuff'),
+      assistantEntry(SONNET, u1, { messageId: 'm1' }),
+      toolResultEntry(),
+      assistantEntry(SONNET, u2, { messageId: 'm2' }),
+      toolResultEntry(),
+      assistantEntry(SONNET, u3, { messageId: 'm3' }),
+    ]);
+    const turn = getCurrentTurn(tp);
+    assert.equal(turn.apiCalls, 3);
+    assert.equal(turn.usage.input_tokens, 9);
+    assert.equal(turn.usage.output_tokens, 550);
+    assert.equal(turn.usage.cache_read_input_tokens, 6000);
+    assert.equal(turn.usage.cache_creation_input_tokens, 250);
+  } finally { fs.rmSync(dir, { recursive: true }); }
+});
+
+test('turn: dedup por message.id (blocos de conteúdo da mesma call)', () => {
+  const dir = makeTempDir();
+  try {
+    const u = { input_tokens: 1, output_tokens: 1624, cache_read_input_tokens: 93186, cache_creation_input_tokens: 3695 };
+    const tp = writeTranscript(dir, [
+      userPrompt('x'),
+      assistantEntry(SONNET, u, { messageId: 'msg_dup' }),
+      assistantEntry(SONNET, u, { messageId: 'msg_dup' }),
+      assistantEntry(SONNET, u, { messageId: 'msg_dup' }),
+    ]);
+    const turn = getCurrentTurn(tp);
+    assert.equal(turn.apiCalls, 1, 'three lines with same message.id count as one API call');
+    assert.equal(turn.usage.input_tokens, 1);
+    assert.equal(turn.usage.output_tokens, 1624);
+    assert.equal(turn.usage.cache_read_input_tokens, 93186);
+    assert.equal(turn.usage.cache_creation_input_tokens, 3695);
+  } finally { fs.rmSync(dir, { recursive: true }); }
+});
+
+test('turn: ignora entries antes do último prompt user real', () => {
+  const dir = makeTempDir();
+  try {
+    const oldUsage = { input_tokens: 999, output_tokens: 999, cache_read_input_tokens: 999, cache_creation_input_tokens: 999 };
+    const newUsage = { input_tokens: 7,   output_tokens: 14,  cache_read_input_tokens: 21,  cache_creation_input_tokens: 28 };
+    const tp = writeTranscript(dir, [
+      userPrompt('previous turn'),
+      assistantEntry(SONNET, oldUsage, { messageId: 'old' }),
+      userPrompt('new turn'),
+      assistantEntry(SONNET, newUsage, { messageId: 'new' }),
+    ]);
+    const turn = getCurrentTurn(tp);
+    assert.equal(turn.apiCalls, 1);
+    assert.equal(turn.usage.input_tokens, 7);
+    assert.equal(turn.usage.output_tokens, 14);
+    assert.equal(turn.usage.cache_read_input_tokens, 21);
+    assert.equal(turn.usage.cache_creation_input_tokens, 28);
+  } finally { fs.rmSync(dir, { recursive: true }); }
+});
+
+test('turn: sidechain user prompt NÃO delimita turno', () => {
+  const dir = makeTempDir();
+  try {
+    const u1 = { input_tokens: 5, output_tokens: 100, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0 };
+    const u2 = { input_tokens: 3, output_tokens: 200, cache_read_input_tokens: 2000, cache_creation_input_tokens: 0 };
+    const tp = writeTranscript(dir, [
+      userPrompt('main'),
+      assistantEntry(SONNET, u1, { messageId: 'm1' }),
+      userPrompt('sub-agent task', { isSidechain: true }),
+      assistantEntry(SONNET, u2, { messageId: 'm2', isSidechain: true }),
+    ]);
+    const turn = getCurrentTurn(tp);
+    assert.equal(turn.apiCalls, 2, 'sidechain entries count toward parent turn');
+    assert.equal(turn.usage.input_tokens, 8);
+    assert.equal(turn.usage.output_tokens, 300);
+  } finally { fs.rmSync(dir, { recursive: true }); }
+});
+
+test('turn: tool_result não delimita turno', () => {
+  const dir = makeTempDir();
+  try {
+    const u1 = { input_tokens: 5, output_tokens: 100, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0 };
+    const u2 = { input_tokens: 3, output_tokens: 200, cache_read_input_tokens: 2000, cache_creation_input_tokens: 0 };
+    const tp = writeTranscript(dir, [
+      userPrompt('go'),
+      assistantEntry(SONNET, u1, { messageId: 'm1' }),
+      toolResultEntry(),
+      assistantEntry(SONNET, u2, { messageId: 'm2' }),
+    ]);
+    const turn = getCurrentTurn(tp);
+    assert.equal(turn.apiCalls, 2);
+    assert.equal(turn.usage.output_tokens, 300);
   } finally { fs.rmSync(dir, { recursive: true }); }
 });
 
 test('parsing: retorna null quando não há entries assistant', () => {
   const dir = makeTempDir();
   try {
-    const tp = writeTranscript(dir, [userEntry(), userEntry()]);
-    assert.equal(getLastAssistantTurn(tp), null);
+    const tp = writeTranscript(dir, [userPrompt(), userPrompt()]);
+    assert.equal(getCurrentTurn(tp), null);
   } finally { fs.rmSync(dir, { recursive: true }); }
 });
 
@@ -84,7 +194,7 @@ test('parsing: retorna null para transcript vazio', () => {
   try {
     const tp = path.join(dir, 'transcript.jsonl');
     fs.writeFileSync(tp, '');
-    assert.equal(getLastAssistantTurn(tp), null);
+    assert.equal(getCurrentTurn(tp), null);
   } finally { fs.rmSync(dir, { recursive: true }); }
 });
 
@@ -92,16 +202,40 @@ test('parsing: ignora linhas JSON inválidas sem crash', () => {
   const dir = makeTempDir();
   try {
     const tp = path.join(dir, 'transcript.jsonl');
-    fs.writeFileSync(tp, 'not-json\n' + JSON.stringify(assistantEntry(SONNET, sampleUsage)));
-    const turn = getLastAssistantTurn(tp);
+    fs.writeFileSync(tp, 'not-json\n' + JSON.stringify(userPrompt()) + '\n' + JSON.stringify(assistantEntry(SONNET, sampleUsage)));
+    const turn = getCurrentTurn(tp);
     assert.ok(turn !== null);
+    assert.equal(turn.apiCalls, 1);
+  } finally { fs.rmSync(dir, { recursive: true }); }
+});
+
+test('parsing: extrai gitBranch do transcript (ignora HEAD)', () => {
+  const dir = makeTempDir();
+  try {
+    const tp = writeTranscript(dir, [
+      userPrompt('x', { gitBranch: 'HEAD' }),
+      userPrompt('y', { gitBranch: 'feat/AIOX-123-token-tracking', slug: 'minha-sessao-gifted-turing' }),
+      assistantEntry(SONNET, sampleUsage),
+    ]);
+    const turn = getCurrentTurn(tp);
+    assert.equal(turn.gitBranch, 'feat/AIOX-123-token-tracking');
+    assert.equal(turn.sessionSlug, 'minha-sessao-gifted-turing');
+  } finally { fs.rmSync(dir, { recursive: true }); }
+});
+
+test('parsing: gitBranch e sessionSlug null quando ausentes', () => {
+  const dir = makeTempDir();
+  try {
+    const tp = writeTranscript(dir, [userPrompt(), assistantEntry(SONNET, sampleUsage)]);
+    const turn = getCurrentTurn(tp);
+    assert.equal(turn.gitBranch, null);
+    assert.equal(turn.sessionSlug, null);
   } finally { fs.rmSync(dir, { recursive: true }); }
 });
 
 // ── calculateCost ────────────────────────────────────────────────────────────
 
 test('pricing: Sonnet 4.6 — cálculo correto', () => {
-  // $3/M input + $15/M output + $0.30/M cache_read + $3.75/M cache_write
   const cost = calculateCost(SONNET, {
     input_tokens: 1_000_000,
     output_tokens: 1_000_000,
@@ -122,18 +256,8 @@ test('pricing: Haiku 4.5 — cálculo correto', () => {
 });
 
 test('pricing: modelo desconhecido usa fallback Sonnet', () => {
-  const costUnknown = calculateCost('claude-unknown-model', {
-    input_tokens: 1_000_000,
-    output_tokens: 0,
-    cache_read_input_tokens: 0,
-    cache_creation_input_tokens: 0,
-  });
-  const costSonnet = calculateCost(SONNET, {
-    input_tokens: 1_000_000,
-    output_tokens: 0,
-    cache_read_input_tokens: 0,
-    cache_creation_input_tokens: 0,
-  });
+  const costUnknown = calculateCost('claude-unknown-model', { input_tokens: 1_000_000 });
+  const costSonnet  = calculateCost(SONNET, { input_tokens: 1_000_000 });
   assert.equal(costUnknown, costSonnet);
 });
 
@@ -144,10 +268,10 @@ test('pricing: campos ausentes no usage tratados como zero', () => {
 
 // ── processEvent (integração) ─────────────────────────────────────────────────
 
-test('integração: appenda entry correto em usage.json', async () => {
+test('integração: appenda entry correto em usage.json (single call)', async () => {
   const dir = makeTempDir();
   try {
-    const tp = writeTranscript(dir, [assistantEntry(SONNET, sampleUsage)]);
+    const tp = writeTranscript(dir, [userPrompt(), assistantEntry(SONNET, sampleUsage)]);
     const usagePath = path.join(dir, 'usage.json');
 
     await processEvent(
@@ -158,6 +282,7 @@ test('integração: appenda entry correto em usage.json', async () => {
     const entries = JSON.parse(fs.readFileSync(usagePath, 'utf8'));
     assert.equal(entries.length, 1);
     assert.equal(entries[0].model, SONNET);
+    assert.equal(entries[0].api_calls, 1);
     assert.equal(entries[0].in, 10);
     assert.equal(entries[0].out, 200);
     assert.equal(entries[0].cache_r, 5000);
@@ -165,21 +290,40 @@ test('integração: appenda entry correto em usage.json', async () => {
     assert.equal(entries[0].session_id, 'sess-1');
     assert.equal(entries[0].project, '/my/project');
     assert.ok(entries[0].cost_usd > 0);
-    assert.ok(entries[0].date);
-    assert.ok(entries[0].timestamp);
+  } finally { fs.rmSync(dir, { recursive: true }); }
+});
+
+test('integração: appenda usage SOMADO em turno multi-call', async () => {
+  const dir = makeTempDir();
+  try {
+    const u1 = { input_tokens: 5, output_tokens: 100, cache_read_input_tokens: 1000, cache_creation_input_tokens: 200 };
+    const u2 = { input_tokens: 3, output_tokens: 400, cache_read_input_tokens: 2000, cache_creation_input_tokens: 50  };
+    const tp = writeTranscript(dir, [
+      userPrompt(),
+      assistantEntry(SONNET, u1, { messageId: 'm1' }),
+      toolResultEntry(),
+      assistantEntry(SONNET, u2, { messageId: 'm2' }),
+    ]);
+    const usagePath = path.join(dir, 'usage.json');
+
+    await processEvent({ transcript_path: tp, session_id: 's', cwd: '/p' }, { usagePath });
+
+    const [entry] = JSON.parse(fs.readFileSync(usagePath, 'utf8'));
+    assert.equal(entry.api_calls, 2);
+    assert.equal(entry.in,  8);
+    assert.equal(entry.out, 500);
+    assert.equal(entry.cache_r, 3000);
+    assert.equal(entry.cache_write, 250);
   } finally { fs.rmSync(dir, { recursive: true }); }
 });
 
 test('integração: cria usage.json quando não existe', async () => {
   const dir = makeTempDir();
   try {
-    const tp = writeTranscript(dir, [assistantEntry(SONNET, sampleUsage)]);
+    const tp = writeTranscript(dir, [userPrompt(), assistantEntry(SONNET, sampleUsage)]);
     const usagePath = path.join(dir, 'nonexistent', 'usage.json');
 
-    await processEvent(
-      { hook_event_name: 'Stop', transcript_path: tp, session_id: 's', cwd: '/p' },
-      { usagePath }
-    );
+    await processEvent({ transcript_path: tp, session_id: 's', cwd: '/p' }, { usagePath });
 
     const entries = JSON.parse(fs.readFileSync(usagePath, 'utf8'));
     assert.equal(entries.length, 1);
@@ -191,11 +335,11 @@ test('integração: acumula múltiplas entradas', async () => {
   try {
     const usagePath = path.join(dir, 'usage.json');
 
-    const tp1 = writeTranscript(dir, [assistantEntry(SONNET, { ...sampleUsage, output_tokens: 100 })]);
+    const tp1 = writeTranscript(dir, [userPrompt(), assistantEntry(SONNET, { ...sampleUsage, output_tokens: 100 })]);
     await processEvent({ transcript_path: tp1, session_id: 's', cwd: '/p' }, { usagePath });
 
     const tp2 = path.join(dir, 'transcript2.jsonl');
-    fs.writeFileSync(tp2, JSON.stringify(assistantEntry(SONNET, { ...sampleUsage, output_tokens: 200 })));
+    fs.writeFileSync(tp2, JSON.stringify(userPrompt()) + '\n' + JSON.stringify(assistantEntry(SONNET, { ...sampleUsage, output_tokens: 200 })));
     await processEvent({ transcript_path: tp2, session_id: 's', cwd: '/p' }, { usagePath });
 
     const entries = JSON.parse(fs.readFileSync(usagePath, 'utf8'));
@@ -205,39 +349,13 @@ test('integração: acumula múltiplas entradas', async () => {
   } finally { fs.rmSync(dir, { recursive: true }); }
 });
 
-test('parsing: extrai gitBranch do transcript (ignora HEAD)', () => {
-  const dir = makeTempDir();
-  try {
-    const entries = [
-      userEntry({ gitBranch: 'HEAD' }),
-      assistantEntry(SONNET, sampleUsage),
-      userEntry({ gitBranch: 'feat/AIOX-123-token-tracking', slug: 'minha-sessao-gifted-turing' }),
-    ];
-    const tp = writeTranscript(dir, entries);
-    const turn = getLastAssistantTurn(tp);
-    assert.equal(turn.gitBranch, 'feat/AIOX-123-token-tracking');
-    assert.equal(turn.sessionSlug, 'minha-sessao-gifted-turing');
-  } finally { fs.rmSync(dir, { recursive: true }); }
-});
-
-test('parsing: gitBranch e sessionSlug null quando ausentes', () => {
-  const dir = makeTempDir();
-  try {
-    const tp = writeTranscript(dir, [assistantEntry(SONNET, sampleUsage)]);
-    const turn = getLastAssistantTurn(tp);
-    assert.equal(turn.gitBranch, null);
-    assert.equal(turn.sessionSlug, null);
-  } finally { fs.rmSync(dir, { recursive: true }); }
-});
-
 test('integração: grava git_branch e session_name no entry', async () => {
   const dir = makeTempDir();
   try {
-    const entries = [
-      userEntry({ gitBranch: 'feat/AIOX-42-my-story', slug: 'sessao-de-teste-jolly-fox' }),
+    const tp = writeTranscript(dir, [
+      userPrompt('go', { gitBranch: 'feat/AIOX-42-my-story', slug: 'sessao-de-teste-jolly-fox' }),
       assistantEntry(SONNET, sampleUsage),
-    ];
-    const tp = writeTranscript(dir, entries);
+    ]);
     const usagePath = path.join(dir, 'usage.json');
     await processEvent({ transcript_path: tp, session_id: 's', cwd: '/p' }, { usagePath });
     const [entry] = JSON.parse(fs.readFileSync(usagePath, 'utf8'));

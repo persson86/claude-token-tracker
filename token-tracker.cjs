@@ -25,33 +25,66 @@ function readStdin() {
   });
 }
 
-function getLastAssistantTurn(transcriptPath) {
+// A "real user prompt" delimits the start of a turn. tool_result entries are
+// part of the ongoing turn, not new prompts. Sidechain (sub-agent) entries
+// don't delimit the parent turn either.
+function isRealUserPrompt(e) {
+  if (e.type !== 'user' || e.isSidechain) return false;
+  const c = e.message?.content;
+  if (typeof c === 'string') return true;
+  if (Array.isArray(c) && !c.some(p => p?.type === 'tool_result')) return true;
+  return false;
+}
+
+// Aggregates usage for the current turn: every assistant API call since the
+// last real user prompt, deduped by message.id (the transcript stores one
+// line per content block — text + each tool_use — all sharing the same
+// message.id and usage payload from a single API call).
+function getCurrentTurn(transcriptPath) {
   let content;
   try { content = fs.readFileSync(transcriptPath, 'utf8'); } catch { return null; }
 
   const lines = content.trim().split('\n');
-  let assistantTurn = null;
-  let gitBranch = null;
-  let sessionSlug = null;
-
-  for (let i = lines.length - 1; i >= 0; i--) {
-    try {
-      const entry = JSON.parse(lines[i]);
-      if (!assistantTurn && entry.type === 'assistant' && entry.message?.usage) {
-        assistantTurn = { model: entry.message.model, usage: entry.message.usage };
-      }
-      if (!gitBranch && entry.gitBranch && entry.gitBranch !== 'HEAD') {
-        gitBranch = entry.gitBranch;
-      }
-      if (!sessionSlug && entry.slug) {
-        sessionSlug = entry.slug;
-      }
-      if (assistantTurn && gitBranch && sessionSlug) break;
-    } catch { /* skip malformed lines */ }
+  const entries = [];
+  for (const line of lines) {
+    try { entries.push(JSON.parse(line)); } catch { /* skip malformed */ }
   }
 
-  if (!assistantTurn) return null;
-  return { model: assistantTurn.model, usage: assistantTurn.usage, gitBranch, sessionSlug };
+  let gitBranch = null;
+  let sessionSlug = null;
+  let turnStart = 0;
+
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (!gitBranch && e.gitBranch && e.gitBranch !== 'HEAD') gitBranch = e.gitBranch;
+    if (!sessionSlug && e.slug) sessionSlug = e.slug;
+    if (isRealUserPrompt(e)) { turnStart = i; break; }
+  }
+
+  const seen = new Set();
+  const total = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  let model = null;
+  let apiCalls = 0;
+
+  for (let i = turnStart; i < entries.length; i++) {
+    const e = entries[i];
+    if (e.type !== 'assistant' || !e.message?.usage) continue;
+    const id = e.message.id;
+    if (id) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+    }
+    const u = e.message.usage;
+    total.input_tokens               += u.input_tokens               || 0;
+    total.output_tokens              += u.output_tokens              || 0;
+    total.cache_read_input_tokens    += u.cache_read_input_tokens    || 0;
+    total.cache_creation_input_tokens += u.cache_creation_input_tokens || 0;
+    model = e.message.model || model;
+    apiCalls++;
+  }
+
+  if (apiCalls === 0) return null;
+  return { model, usage: total, apiCalls, gitBranch, sessionSlug };
 }
 
 function calculateCost(model, usage = {}) {
@@ -74,7 +107,7 @@ async function processEvent(input, config = {}) {
   const { transcript_path, session_id, cwd } = input;
   if (!transcript_path) return;
 
-  const turn = getLastAssistantTurn(transcript_path);
+  const turn = getCurrentTurn(transcript_path);
   if (!turn) return;
 
   const cost    = calculateCost(turn.model, turn.usage);
@@ -96,6 +129,7 @@ async function processEvent(input, config = {}) {
     project:       cwd || null,
     git_branch:    turn.gitBranch || null,
     model:         turn.model,
+    api_calls:     turn.apiCalls,
     in:            usage.input_tokens               || 0,
     out:           usage.output_tokens              || 0,
     cache_r:       usage.cache_read_input_tokens    || 0,
@@ -120,4 +154,4 @@ function run() {
 }
 
 if (require.main === module) run();
-module.exports = { main, processEvent, getLastAssistantTurn, calculateCost };
+module.exports = { main, processEvent, getCurrentTurn, calculateCost };

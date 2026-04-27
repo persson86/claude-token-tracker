@@ -43,14 +43,21 @@ Every turn is appended to `~/.claude/token-usage.json`:
     "date": "2026-04-26",
     "timestamp": "2026-04-26T14:32:00.000Z",
     "session_id": "...",
+    "session_name": "my-session-slug",
     "project": "/home/user/my-project",
-    "in": 1,
-    "out": 388,
-    "cache_r": 29804,
-    "cost_usd": 0.07732100
+    "git_branch": "feat/my-branch",
+    "model": "claude-sonnet-4-6",
+    "api_calls": 4,
+    "in": 9,
+    "out": 1500,
+    "cache_r": 120000,
+    "cache_write": 8000,
+    "cost_usd": 0.0628
   }
 ]
 ```
+
+`api_calls` is the number of API round-trips in the turn — turns with tool use make several calls (one per tool round-trip), and all of them are summed.
 
 This file is local — it is never committed to the repository.
 
